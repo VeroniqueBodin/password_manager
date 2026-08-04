@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  connectivity_plus
   dargon2_flutter_desktop
   flutter_secure_storage_windows
 )
