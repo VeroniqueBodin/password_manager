@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../domain/i_derive_master_key.dart';
@@ -14,6 +15,10 @@ class VaultService {
   final ISynchronizeVaultFiles _synchronizer;
   final IStoreLocalSecrets _secretRepository;
 
+  static const int biometricSessionWindowMinutes = 10;
+
+  bool isAuthenticatingBiometrically = false;
+
   VaultService(
       this._keyDerivation,
       this._passwordRepository,
@@ -22,6 +27,20 @@ class VaultService {
       );
 
   IStorePasswords get repository => _passwordRepository;
+
+  Future<bool> isBiometricSessionValid() async {
+    final lastLogin = await _secretRepository.getLastMasterLoginTimestamp();
+    if (lastLogin == null) return false;
+
+    final difference = DateTime.now().difference(lastLogin);
+    if (difference.inMinutes >= biometricSessionWindowMinutes) {
+      await _secretRepository.clearSessionMasterKey();
+      return false;
+    }
+
+    final key = await _secretRepository.getSessionMasterKey();
+    return key != null;
+  }
 
   Future<void> unlockVault(String masterPassword, String userHash, bool isOnline) async {
     final dbDir = await getDatabasesPath();
@@ -37,7 +56,6 @@ class VaultService {
 
       try {
         final tempFile = await _synchronizer.downloadVaultFile(userHash, tempDbPath);
-
         await _passwordRepository.openVault(masterKey, tempDbPath);
 
         final remoteVersion = await _passwordRepository.getVaultVersion();
@@ -47,44 +65,66 @@ class VaultService {
 
         if (remoteVersion < localVersion) {
           if (tempFile.existsSync()) tempFile.deleteSync();
-          throw Exception('Alerte de sécurité : Tentative de Rollback détectée.');
+          await _passwordRepository.openVault(masterKey, localDbPath);
+          await syncVaultToCloud(userHash);
+        } else {
+          final localFile = File(localDbPath);
+          if (localFile.existsSync()) localFile.deleteSync();
+          tempFile.renameSync(localDbPath);
+          await _secretRepository.saveLastSeenVaultVersion(userHash, remoteVersion);
+          await _passwordRepository.openVault(masterKey, localDbPath);
         }
 
-        final localFile = File(localDbPath);
-        if (localFile.existsSync()) {
-          localFile.deleteSync();
-        }
-        tempFile.renameSync(localDbPath);
+        await _secretRepository.saveSessionMasterKey(masterKey);
+        await _secretRepository.saveLastMasterLoginTimestamp(DateTime.now());
 
-        await _secretRepository.saveLastSeenVaultVersion(userHash, remoteVersion);
-
-        await _passwordRepository.openVault(masterKey, localDbPath);
       } finally {
         masterKey.fillRange(0, masterKey.length, 0);
       }
-
     } else {
       final credentials = await _secretRepository.getWebDavCredentials();
       if (credentials.isEmpty) {
         throw Exception('Impossible de se connecter hors-ligne sans première initialisation.');
       }
 
-      if (!File(localDbPath).existsSync()) {
-        throw Exception('Aucun coffre local trouvé pour le mode hors-ligne.');
-      }
-
-      if (!File(localMetaPath).existsSync()) {
-        throw Exception('Métadonnées introuvables pour le mode hors-ligne.');
+      if (!File(localDbPath).existsSync() || !File(localMetaPath).existsSync()) {
+        throw Exception('Coffre local ou métadonnées introuvables.');
       }
 
       final fallbackParameters = VaultParameters.fromJson(jsonDecode(await File(localMetaPath).readAsString()));
       final masterKey = await _keyDerivation.deriveKey(masterPassword, fallbackParameters);
-
       try {
         await _passwordRepository.openVault(masterKey, localDbPath);
+        await _secretRepository.saveSessionMasterKey(masterKey);
+        await _secretRepository.saveLastMasterLoginTimestamp(DateTime.now());
       } finally {
         masterKey.fillRange(0, masterKey.length, 0);
       }
+    }
+  }
+
+  Future<void> unlockVaultWithBiometrics(String userHash) async {
+    final isValid = await isBiometricSessionValid();
+    if (!isValid) {
+      throw Exception('Session biométrique expirée (10 minutes dépassées). Mot de passe maître requis.');
+    }
+
+    final masterKey = await _secretRepository.getSessionMasterKey();
+    if (masterKey == null) {
+      throw Exception('Clé de session introuvable.');
+    }
+
+    final dbDir = await getDatabasesPath();
+    final localDbPath = p.join(dbDir, 'vault_$userHash.db');
+
+    if (!File(localDbPath).existsSync()) {
+      throw Exception('Aucune base de données locale trouvée.');
+    }
+
+    try {
+      await _passwordRepository.openVault(masterKey, localDbPath);
+    } finally {
+      masterKey.fillRange(0, masterKey.length, 0);
     }
   }
 
@@ -105,6 +145,9 @@ class VaultService {
 
       final localFile = File(localDbPath);
       await _synchronizer.uploadVaultFile(userHash, localFile);
+
+      await _secretRepository.saveSessionMasterKey(masterKey);
+      await _secretRepository.saveLastMasterLoginTimestamp(DateTime.now());
     } finally {
       masterKey.fillRange(0, masterKey.length, 0);
     }
@@ -114,6 +157,7 @@ class VaultService {
     final dbDir = await getDatabasesPath();
     final localDbPath = p.join(dbDir, 'vault_$userHash.db');
 
+    await _passwordRepository.flush();
     await _synchronizer.createRollingBackup(userHash);
 
     final localFile = File(localDbPath);

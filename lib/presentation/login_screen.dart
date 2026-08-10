@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:local_auth/local_auth.dart';
 import '../application/vault_service.dart';
 import '../domain/i_check_network_connection.dart';
 import '../domain/i_store_local_secrets.dart';
@@ -23,19 +25,55 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> {
+class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   final _formKey = GlobalKey<FormState>();
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  final LocalAuthentication _localAuth = LocalAuthentication();
 
   bool _isLoading = false;
+  bool _canUseBiometrics = false;
   String? _errorMessage;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _loadSavedUsernameAndCheckBiometrics();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadSavedUsernameAndCheckBiometrics();
+    }
+  }
+
+  Future<void> _loadSavedUsernameAndCheckBiometrics() async {
+    final savedUsername = await widget.secretRepository.getLastUsername();
+    if (savedUsername != null && mounted) {
+      setState(() {
+        _usernameController.text = savedUsername;
+      });
+    }
+
+    final isSessionValid = await widget.vaultService.isBiometricSessionValid();
+    final canCheckBiometrics = await _localAuth.canCheckBiometrics;
+    final isDeviceSupported = await _localAuth.isDeviceSupported();
+
+    if (mounted) {
+      setState(() {
+        _canUseBiometrics = isSessionValid && (canCheckBiometrics || isDeviceSupported);
+      });
+    }
   }
 
   Future<void> _showWebDavConfigDialog() async {
@@ -92,7 +130,7 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  Future<void> _unlock() async {
+  Future<void> _unlockWithPassword() async {
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -103,6 +141,8 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final rawUsername = _usernameController.text.trim().toLowerCase();
       final userHash = sha256.convert(utf8.encode(rawUsername)).toString();
+
+      await widget.secretRepository.saveLastUsername(rawUsername);
 
       final isOnline = await widget.networkChecker.isConnected;
 
@@ -125,12 +165,78 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         );
       }
-
     } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
+      if (mounted) {
+        setState(() {
+          _errorMessage = e.toString().replaceAll('Exception: ', '');
+        });
+      }
     } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _unlockWithBiometrics() async {
+    if (_usernameController.text.isEmpty) return;
+
+    widget.vaultService.isAuthenticatingBiometrically = true;
+
+    try {
+      final authenticated = await _localAuth.authenticate(
+        localizedReason: 'Veuillez vous authentifier pour ouvrir le coffre',
+        biometricOnly: false,
+        persistAcrossBackgrounding: true,
+      );
+
+      widget.vaultService.isAuthenticatingBiometrically = false;
+
+      if (!authenticated) return;
+
+      if (mounted) {
+        setState(() {
+          _isLoading = true;
+          _errorMessage = null;
+        });
+      }
+
+      final rawUsername = _usernameController.text.trim().toLowerCase();
+      final userHash = sha256.convert(utf8.encode(rawUsername)).toString();
+
+      await widget.vaultService.unlockVaultWithBiometrics(userHash);
+
+      final isOnline = await widget.networkChecker.isConnected;
+
+      if (mounted) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (context) => VaultScreen(
+              vaultService: widget.vaultService,
+              isOfflineMode: !isOnline,
+              userHash: userHash,
+            ),
+          ),
+        );
+      }
+    } on PlatformException catch (e) {
+      widget.vaultService.isAuthenticatingBiometrically = false;
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Erreur système : ${e.message}';
+        });
+      }
+    } catch (e) {
+      widget.vaultService.isAuthenticatingBiometrically = false;
+      if (mounted) {
+        setState(() {
+          _errorMessage = e.toString().replaceAll('Exception: ', '');
+        });
+      }
+    } finally {
+      widget.vaultService.isAuthenticatingBiometrically = false;
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -189,7 +295,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ),
                   ElevatedButton(
-                    onPressed: _isLoading ? null : _unlock,
+                    onPressed: _isLoading ? null : _unlockWithPassword,
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
                     ),
@@ -197,6 +303,17 @@ class _LoginScreenState extends State<LoginScreen> {
                         ? const CircularProgressIndicator(color: Colors.white)
                         : const Text('Déverrouiller le coffre', style: TextStyle(fontSize: 18)),
                   ),
+                  if (_canUseBiometrics) ...[
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _isLoading ? null : _unlockWithBiometrics,
+                      icon: const Icon(Icons.fingerprint, size: 28),
+                      label: const Text('Déverrouillage Rapide (Biométrie)', style: TextStyle(fontSize: 16)),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   TextButton(
                     onPressed: () {

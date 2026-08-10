@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../domain/i_store_passwords.dart';
@@ -8,14 +9,13 @@ class SqlCipherPasswordRepository implements IStorePasswords {
 
   @override
   Future<void> openVault(Uint8List key, String dbPath) async {
-    final stringKey = String.fromCharCodes(key);
+    final stringKey = base64Encode(key);
 
     _db = await openDatabase(
       dbPath,
       password: stringKey,
       version: 1,
       onCreate: (db, version) async {
-        await _configurePragmas(db);
         await db.execute(
             '''
           CREATE TABLE passwords (
@@ -30,31 +30,10 @@ class SqlCipherPasswordRepository implements IStorePasswords {
           )
           '''
         );
-        await db.execute(
-            '''
-          CREATE TABLE vault_metadata (
-            key TEXT PRIMARY KEY,
-            value INTEGER
-          )
-          '''
-        );
-        await db.execute(
-            '''
-          INSERT INTO vault_metadata (key, value) VALUES ('vault_version', 1)
-          '''
-        );
-      },
-      onOpen: (db) async {
-        await _configurePragmas(db);
+        await db.execute('CREATE TABLE vault_metadata (key TEXT PRIMARY KEY, value INTEGER)');
+        await db.execute('INSERT INTO vault_metadata (key, value) VALUES (\'vault_version\', 1)');
       },
     );
-  }
-
-  Future<void> _configurePragmas(Database db) async {
-    await db.execute('PRAGMA cipher_page_size = 4096;');
-    await db.execute('PRAGMA kdf_iter = 256000;');
-    await db.execute('PRAGMA cipher_hmac_algorithm = HMAC_SHA512;');
-    await db.execute('PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;');
   }
 
   @override
@@ -64,17 +43,17 @@ class SqlCipherPasswordRepository implements IStorePasswords {
   }
 
   @override
+  Future<void> flush() async {
+    if (_db != null && _db!.isOpen) {
+      await _db!.execute('PRAGMA wal_checkpoint(FULL);');
+    }
+  }
+
+  @override
   Future<void> addOrUpdatePassword(PasswordEntry entry) async {
-    if (_db == null) throw Exception('Le coffre est fermé.');
-
+    if (_db == null || !_db!.isOpen) throw Exception('Le coffre est fermé.');
     await _db!.transaction((txn) async {
-      await txn.update(
-        'passwords',
-        {'is_current': 0},
-        where: 'id = ?',
-        whereArgs: [entry.id],
-      );
-
+      await txn.update('passwords', {'is_current': 0}, where: 'id = ?', whereArgs: [entry.id]);
       await txn.insert('passwords', {
         'id': entry.id,
         'title': entry.title,
@@ -85,23 +64,16 @@ class SqlCipherPasswordRepository implements IStorePasswords {
         'created_at': entry.createdAt.toIso8601String(),
         'is_current': entry.isCurrent ? 1 : 0,
       });
-
-      await txn.execute(
-          '''
-        UPDATE vault_metadata
-        SET value = value + 1
-        WHERE key = 'vault_version'
-        '''
-      );
+      await txn.execute('UPDATE vault_metadata SET value = value + 1 WHERE key = \'vault_version\'');
     });
   }
 
   @override
   Future<List<PasswordEntry>> getCurrentPasswords() async {
-    if (_db == null) throw Exception('Le coffre est fermé.');
-
+    if (_db == null || !_db!.isOpen) throw Exception('Le coffre est fermé.');
     final List<Map<String, dynamic>> maps = await _db!.query(
       'passwords',
+      columns: ['id', 'title', 'username', 'url', 'notes', 'created_at', 'is_current'],
       where: 'is_current = ?',
       whereArgs: [1],
     );
@@ -110,7 +82,7 @@ class SqlCipherPasswordRepository implements IStorePasswords {
       id: map['id'] as String,
       title: map['title'] as String,
       username: map['username'] as String,
-      password: map['password'] as String,
+      password: '', // Non chargé en mémoire pour sécurité RAM
       url: map['url'] as String,
       notes: map['notes'] as String,
       createdAt: DateTime.parse(map['created_at'] as String),
@@ -119,19 +91,23 @@ class SqlCipherPasswordRepository implements IStorePasswords {
   }
 
   @override
-  Future<int> getVaultVersion() async {
-    if (_db == null) throw Exception('Le coffre est fermé.');
-
+  Future<String> getPasswordForEntry(String id) async {
+    if (_db == null || !_db!.isOpen) throw Exception('Le coffre est fermé.');
     final result = await _db!.query(
-      'vault_metadata',
-      columns: ['value'],
-      where: 'key = ?',
-      whereArgs: ['vault_version'],
+      'passwords',
+      columns: ['password'],
+      where: 'id = ? AND is_current = 1',
+      whereArgs: [id],
     );
+    if (result.isNotEmpty) return result.first['password'] as String;
+    throw Exception('Mot de passe introuvable en base.');
+  }
 
-    if (result.isNotEmpty) {
-      return result.first['value'] as int;
-    }
+  @override
+  Future<int> getVaultVersion() async {
+    if (_db == null || !_db!.isOpen) throw Exception('Le coffre est fermé.');
+    final result = await _db!.query('vault_metadata', columns: ['value'], where: 'key = ?', whereArgs: ['vault_version']);
+    if (result.isNotEmpty) return result.first['value'] as int;
     return 1;
   }
 }

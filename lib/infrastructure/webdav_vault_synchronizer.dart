@@ -103,6 +103,9 @@ class WebDavVaultSynchronizer implements ISynchronizeVaultFiles {
 
       final file = File(destinationPath);
       if (response.statusCode == 200) {
+        if (!await file.parent.exists()) {
+          await file.parent.create(recursive: true);
+        }
         await file.writeAsBytes(response.bodyBytes, flush: true);
       }
 
