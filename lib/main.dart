@@ -72,11 +72,26 @@ class PasswordManagerApp extends StatefulWidget {
 
 class _PasswordManagerAppState extends State<PasswordManagerApp> {
   late SecurityLifecycleObserver _observer;
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
 
   @override
   void initState() {
     super.initState();
-    _observer = SecurityLifecycleObserver(widget.vaultService);
+    _observer = SecurityLifecycleObserver(
+      widget.vaultService,
+      onLock: () {
+        _navigatorKey.currentState?.pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (context) => LoginScreen(
+              vaultService: widget.vaultService,
+              networkChecker: widget.networkChecker,
+              secretRepository: widget.secretRepository,
+            ),
+          ),
+              (route) => false,
+        );
+      },
+    );
     WidgetsBinding.instance.addObserver(_observer);
   }
 
@@ -89,6 +104,7 @@ class _PasswordManagerAppState extends State<PasswordManagerApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       title: 'Gestionnaire MDP',
       theme: ThemeData(
         primarySwatch: Colors.blueGrey,

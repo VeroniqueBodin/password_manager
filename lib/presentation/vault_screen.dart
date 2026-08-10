@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../domain/password_entry.dart';
@@ -25,11 +26,18 @@ class _VaultScreenState extends State<VaultScreen> {
   List<PasswordEntry> _passwords = [];
   bool _isLoading = true;
   bool _isSyncing = false;
+  Timer? _clipboardTimer;
 
   @override
   void initState() {
     super.initState();
     _loadPasswords();
+  }
+
+  @override
+  void dispose() {
+    _clipboardTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadPasswords() async {
@@ -50,22 +58,46 @@ class _VaultScreenState extends State<VaultScreen> {
     }
   }
 
-  Future<void> _secureCopy(String text, String fieldName) async {
-    await Clipboard.setData(ClipboardData(text: text));
+  Future<void> _secureCopy({
+    required String fieldName,
+    String? textToCopyDirectly,
+    String? passwordIdToFetch,
+  }) async {
+    _clipboardTimer?.cancel();
+
+    String textToCopy = textToCopyDirectly ?? '';
+
+    if (passwordIdToFetch != null) {
+      try {
+        textToCopy = await widget.vaultService.repository.getPasswordForEntry(passwordIdToFetch);
+      } catch (e) {
+        if (mounted) {
+          final errorMsg = e.toString().replaceAll('Exception: ', '');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Erreur: $errorMsg'), backgroundColor: Colors.red),
+          );
+        }
+        return;
+      }
+    }
+
+    if (textToCopy.isEmpty) return;
+
+    await Clipboard.setData(ClipboardData(text: textToCopy));
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('$fieldName copié. Effacement dans 20s...'),
+          content: Text('$fieldName copié. Effacement dans 45s...'),
           duration: const Duration(seconds: 3),
         ),
       );
     }
 
-    Future.delayed(const Duration(seconds: 20), () async {
+    _clipboardTimer = Timer(const Duration(seconds: 45), () async {
       final currentClipboard = await Clipboard.getData(Clipboard.kTextPlain);
-      if (currentClipboard != null && currentClipboard.text == text) {
-        await Clipboard.setData(const ClipboardData(text: ''));
+      if (currentClipboard != null && currentClipboard.text == textToCopy) {
+        await Clipboard.setData(const ClipboardData(text: ' '));
       }
     });
   }
@@ -73,7 +105,7 @@ class _VaultScreenState extends State<VaultScreen> {
   Future<void> _lockAndExit() async {
     await widget.vaultService.lockVault();
     if (mounted) {
-      Navigator.of(context).pushReplacement(
+      Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(
           builder: (context) => LoginScreen(
             vaultService: widget.vaultService,
@@ -81,6 +113,7 @@ class _VaultScreenState extends State<VaultScreen> {
             secretRepository: (context.findAncestorWidgetOfExactType<MaterialApp>()!.home as LoginScreen).secretRepository,
           ),
         ),
+            (route) => false,
       );
     }
   }
@@ -142,12 +175,18 @@ class _VaultScreenState extends State<VaultScreen> {
                       children: [
                         IconButton(
                           icon: const Icon(Icons.person_outline),
-                          onPressed: () => _secureCopy(entry.username, 'Identifiant'),
+                          onPressed: () => _secureCopy(
+                            fieldName: 'Identifiant',
+                            textToCopyDirectly: entry.username,
+                          ),
                           tooltip: 'Copier l\'identifiant',
                         ),
                         IconButton(
                           icon: const Icon(Icons.key),
-                          onPressed: () => _secureCopy(entry.password, 'Mot de passe'),
+                          onPressed: () => _secureCopy(
+                            fieldName: 'Mot de passe',
+                            passwordIdToFetch: entry.id,
+                          ),
                           tooltip: 'Copier le mot de passe',
                         ),
                       ],
