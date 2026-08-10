@@ -1,20 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../domain/i_store_passwords.dart';
 import '../domain/password_entry.dart';
 import '../application/vault_service.dart';
 import 'add_password_screen.dart';
+import 'login_screen.dart';
 
 class VaultScreen extends StatefulWidget {
-  final IStorePasswords passwordRepository;
   final VaultService vaultService;
   final bool isOfflineMode;
+  final String userHash;
 
   const VaultScreen({
     Key? key,
-    required this.passwordRepository,
     required this.vaultService,
     required this.isOfflineMode,
+    required this.userHash,
   }) : super(key: key);
 
   @override
@@ -24,6 +24,7 @@ class VaultScreen extends StatefulWidget {
 class _VaultScreenState extends State<VaultScreen> {
   List<PasswordEntry> _passwords = [];
   bool _isLoading = true;
+  bool _isSyncing = false;
 
   @override
   void initState() {
@@ -33,7 +34,7 @@ class _VaultScreenState extends State<VaultScreen> {
 
   Future<void> _loadPasswords() async {
     try {
-      final passwords = await widget.passwordRepository.getCurrentPasswords();
+      final passwords = await widget.vaultService.repository.getCurrentPasswords();
       if (mounted) {
         setState(() {
           _passwords = passwords;
@@ -72,7 +73,15 @@ class _VaultScreenState extends State<VaultScreen> {
   Future<void> _lockAndExit() async {
     await widget.vaultService.lockVault();
     if (mounted) {
-      Navigator.of(context).pop();
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (context) => LoginScreen(
+            vaultService: widget.vaultService,
+            networkChecker: (context.findAncestorWidgetOfExactType<MaterialApp>()!.home as LoginScreen).networkChecker,
+            secretRepository: (context.findAncestorWidgetOfExactType<MaterialApp>()!.home as LoginScreen).secretRepository,
+          ),
+        ),
+      );
     }
   }
 
@@ -83,6 +92,17 @@ class _VaultScreenState extends State<VaultScreen> {
         title: const Text('Mon Coffre-Fort'),
         backgroundColor: widget.isOfflineMode ? Colors.orange.shade800 : Colors.blueGrey,
         actions: [
+          if (_isSyncing)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16.0),
+              child: Center(
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                ),
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.lock),
             onPressed: _lockAndExit,
@@ -146,13 +166,31 @@ class _VaultScreenState extends State<VaultScreen> {
           final result = await Navigator.of(context).push(
             MaterialPageRoute(
               builder: (context) => AddPasswordScreen(
-                passwordRepository: widget.passwordRepository,
+                passwordRepository: widget.vaultService.repository,
               ),
             ),
           );
 
           if (result == true) {
-            _loadPasswords();
+            await _loadPasswords();
+
+            setState(() => _isSyncing = true);
+            try {
+              await widget.vaultService.syncVaultToCloud(widget.userHash);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Coffre synchronisé sur pCloud.'), backgroundColor: Colors.green),
+                );
+              }
+            } catch (e) {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Erreur de synchro : $e'), backgroundColor: Colors.red),
+                );
+              }
+            } finally {
+              if (mounted) setState(() => _isSyncing = false);
+            }
           }
         },
         child: const Icon(Icons.add),

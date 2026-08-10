@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 import 'package:sqflite_sqlcipher/sqflite.dart';
-import 'package:path/path.dart';
 import '../domain/i_store_passwords.dart';
 import '../domain/password_entry.dart';
 
@@ -8,14 +7,11 @@ class SqlCipherPasswordRepository implements IStorePasswords {
   Database? _db;
 
   @override
-  Future<void> openVault(Uint8List key) async {
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'local_vault.db');
-
+  Future<void> openVault(Uint8List key, String dbPath) async {
     final stringKey = String.fromCharCodes(key);
 
     _db = await openDatabase(
-      path,
+      dbPath,
       password: stringKey,
       version: 1,
       onCreate: (db, version) async {

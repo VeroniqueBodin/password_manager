@@ -2,8 +2,6 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
 import '../application/vault_service.dart';
 import '../domain/vault_parameters.dart';
 
@@ -74,9 +72,6 @@ class _InitializationScreenState extends State<InitializationScreen> {
       final userHash = sha256.convert(utf8.encode(rawUsername)).toString();
       final masterPassword = _passwordController.text;
 
-      final directory = await getApplicationDocumentsDirectory();
-      final localDbPath = p.join(directory.path, 'vault_$userHash.db');
-
       final parameters = VaultParameters(
         schemaVersion: 1,
         cipher: 'sqlcipher',
@@ -92,7 +87,6 @@ class _InitializationScreenState extends State<InitializationScreen> {
         userHash,
         masterPassword,
         parameters,
-        localDbPath,
       );
 
       _passwordController.clear();

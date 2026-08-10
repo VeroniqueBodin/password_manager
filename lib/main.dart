@@ -1,5 +1,7 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_windowmanager_plus/flutter_windowmanager_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
 
@@ -13,8 +15,12 @@ import 'presentation/login_screen.dart';
 import 'presentation/security_lifecycle_observer.dart';
 import 'domain/i_store_local_secrets.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (Platform.isAndroid) {
+    await FlutterWindowManagerPlus.addFlags(FlutterWindowManagerPlus.FLAG_SECURE);
+  }
 
   const secureStorage = FlutterSecureStorage();
   final secretRepository = SecureStorageSecretRepository(secureStorage);

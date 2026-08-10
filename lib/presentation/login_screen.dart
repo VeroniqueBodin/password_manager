@@ -1,13 +1,11 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
 import '../application/vault_service.dart';
 import '../domain/i_check_network_connection.dart';
 import '../domain/i_store_local_secrets.dart';
 import 'initialization_screen.dart';
+import 'vault_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   final VaultService vaultService;
@@ -108,28 +106,24 @@ class _LoginScreenState extends State<LoginScreen> {
 
       final isOnline = await widget.networkChecker.isConnected;
 
-      final directory = await getApplicationDocumentsDirectory();
-      final localDbPath = p.join(directory.path, 'vault_$userHash.db');
-      final tempDbPath = p.join(directory.path, 'temp_$userHash.db');
-
       await widget.vaultService.unlockVault(
         _passwordController.text,
         userHash,
         isOnline,
-        localDbPath,
-        tempDbPath,
       );
 
       _passwordController.clear();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Coffre déverrouillé avec succès !'),
-            backgroundColor: Colors.green,
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (context) => VaultScreen(
+              vaultService: widget.vaultService,
+              isOfflineMode: !isOnline,
+              userHash: userHash,
+            ),
           ),
         );
-        // Ici viendra la navigation vers le VaultScreen plus tard
       }
 
     } catch (e) {

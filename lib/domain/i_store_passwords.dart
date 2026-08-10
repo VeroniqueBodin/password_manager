@@ -2,7 +2,7 @@ import 'dart:typed_data';
 import 'password_entry.dart';
 
 abstract class IStorePasswords {
-  Future<void> openVault(Uint8List key);
+  Future<void> openVault(Uint8List key, String dbPath);
 
   Future<void> closeVault();
 

@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:retry/retry.dart';
 import '../domain/i_synchronize_vault_files.dart';
 import '../domain/i_store_local_secrets.dart';
 import '../domain/vault_parameters.dart';
@@ -16,6 +18,21 @@ class WebDavVaultSynchronizer implements ISynchronizeVaultFiles {
       this._client,
       );
 
+  Future<T> _withRetry<T>(Future<T> Function() action) async {
+    try {
+      return await retry(
+        action,
+        retryIf: (e) => e is SocketException || e is TimeoutException,
+        maxAttempts: 3,
+        delayFactor: const Duration(seconds: 2),
+      );
+    } on SocketException {
+      throw Exception('Erreur réseau : Impossible de joindre pCloud. Vérifiez votre connexion internet.');
+    } on TimeoutException {
+      throw Exception('Erreur réseau : Le serveur pCloud met trop de temps à répondre (Délai dépassé).');
+    }
+  }
+
   Future<Map<String, String>> _getAuthHeaders() async {
     final credentials = await _secretRepository.getWebDavCredentials();
     final username = credentials['username'] ?? '';
@@ -30,104 +47,127 @@ class WebDavVaultSynchronizer implements ISynchronizeVaultFiles {
 
   @override
   Future<VaultParameters> fetchParameters(String userHash) async {
-    final headers = await _getAuthHeaders();
-    final url = Uri.parse('$_baseUrl/vaults/$userHash/meta.json');
+    return _withRetry(() async {
+      final headers = await _getAuthHeaders();
+      final url = Uri.parse('$_baseUrl/vaults/$userHash/meta.json');
 
-    final response = await _client.get(url, headers: headers);
+      final response = await _client.get(url, headers: headers).timeout(const Duration(seconds: 10));
 
-    if (response.statusCode != 200) {
-      throw Exception('Impossible de récupérer les métadonnées du coffre.');
-    }
+      if (response.statusCode != 200) {
+        throw Exception('Impossible de récupérer les métadonnées. Code: ${response.statusCode}');
+      }
 
-    final jsonMap = jsonDecode(response.body) as Map<String, dynamic>;
-    return VaultParameters.fromJson(jsonMap);
+      final jsonMap = jsonDecode(response.body) as Map<String, dynamic>;
+      return VaultParameters.fromJson(jsonMap);
+    });
   }
 
   @override
   Future<void> uploadParameters(String userHash, VaultParameters parameters) async {
-    final headers = await _getAuthHeaders();
-    final url = Uri.parse('$_baseUrl/vaults/$userHash/meta.json');
+    return _withRetry(() async {
+      final headers = await _getAuthHeaders();
 
-    final response = await _client.put(
-      url,
-      headers: headers,
-      body: jsonEncode(parameters.toJson()),
-    );
+      final folderUrl = Uri.parse('$_baseUrl/vaults/$userHash/');
+      final mkcolResponse = await _client.send(
+          http.Request('MKCOL', folderUrl)..headers.addAll(headers)
+      ).timeout(const Duration(seconds: 10));
 
-    if (response.statusCode >= 400) {
-      throw Exception('Erreur lors de la sauvegarde des métadonnées.');
-    }
+      if (mkcolResponse.statusCode != 201 && mkcolResponse.statusCode != 405) {
+        throw Exception('Impossible de créer le dossier utilisateur. Code: ${mkcolResponse.statusCode}');
+      }
+
+      final url = Uri.parse('$_baseUrl/vaults/$userHash/meta.json');
+      final response = await _client.put(
+        url,
+        headers: headers,
+        body: jsonEncode(parameters.toJson()),
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode >= 400) {
+        throw Exception('Erreur lors de la sauvegarde des métadonnées.');
+      }
+    });
   }
 
   @override
   Future<File> downloadVaultFile(String userHash, String destinationPath) async {
-    final headers = await _getAuthHeaders();
-    final url = Uri.parse('$_baseUrl/vaults/$userHash/vault.db');
+    return _withRetry(() async {
+      final headers = await _getAuthHeaders();
+      final url = Uri.parse('$_baseUrl/vaults/$userHash/vault.db');
 
-    final response = await _client.get(url, headers: headers);
+      final response = await _client.get(url, headers: headers).timeout(const Duration(seconds: 30));
 
-    if (response.statusCode != 200 && response.statusCode != 404) {
-      throw Exception('Erreur de téléchargement du coffre.');
-    }
+      if (response.statusCode != 200 && response.statusCode != 404) {
+        throw Exception('Erreur de téléchargement du coffre.');
+      }
 
-    final file = File(destinationPath);
-    if (response.statusCode == 200) {
-      await file.writeAsBytes(response.bodyBytes, flush: true);
-    }
+      final file = File(destinationPath);
+      if (response.statusCode == 200) {
+        await file.writeAsBytes(response.bodyBytes, flush: true);
+      }
 
-    return file;
+      return file;
+    });
   }
 
   @override
   Future<void> uploadVaultFile(String userHash, File localVaultFile) async {
-    final headers = await _getAuthHeaders();
+    return _withRetry(() async {
+      final headers = await _getAuthHeaders();
+      final tempUrl = Uri.parse('$_baseUrl/vaults/$userHash/vault_temp.db');
+      final finalUrl = Uri.parse('$_baseUrl/vaults/$userHash/vault.db');
 
-    final tempUrl = Uri.parse('$_baseUrl/vaults/$userHash/vault_temp.db');
-    final finalUrl = Uri.parse('$_baseUrl/vaults/$userHash/vault.db');
+      final fileBytes = await localVaultFile.readAsBytes();
 
-    final fileBytes = await localVaultFile.readAsBytes();
+      final putResponse = await _client.put(
+        tempUrl,
+        headers: headers,
+        body: fileBytes,
+      ).timeout(const Duration(seconds: 30));
 
-    final putResponse = await _client.put(
-      tempUrl,
-      headers: headers,
-      body: fileBytes,
-    );
+      if (putResponse.statusCode >= 400) {
+        throw Exception('Échec de l\'envoi du fichier temporaire.');
+      }
 
-    if (putResponse.statusCode >= 400) {
-      throw Exception('Échec de l\'upload du fichier temporaire.');
-    }
+      final moveHeaders = Map<String, String>.from(headers)
+        ..['Destination'] = finalUrl.toString()
+        ..['Overwrite'] = 'T';
 
-    final moveHeaders = Map<String, String>.from(headers)
-      ..['Destination'] = finalUrl.toString()
-      ..['Overwrite'] = 'T';
+      final moveResponse = await _client.send(
+          http.Request('MOVE', tempUrl)..headers.addAll(moveHeaders)
+      ).timeout(const Duration(seconds: 10));
 
-    final moveResponse = await _client.send(
-        http.Request('MOVE', tempUrl)..headers.addAll(moveHeaders)
-    );
-
-    if (moveResponse.statusCode >= 400) {
-      throw Exception('Échec du remplacement atomique du coffre.');
-    }
+      if (moveResponse.statusCode >= 400) {
+        throw Exception('Échec du remplacement atomique sur le serveur.');
+      }
+    });
   }
 
   @override
   Future<void> createRollingBackup(String userHash) async {
-    final headers = await _getAuthHeaders();
-    final sourceUrl = Uri.parse('$_baseUrl/vaults/$userHash/vault.db');
+    return _withRetry(() async {
+      final headers = await _getAuthHeaders();
 
-    final timestamp = DateTime.now().toUtc().toIso8601String().replaceAll(':', '-');
-    final backupUrl = Uri.parse('$_baseUrl/vaults/$userHash/backups/vault_$timestamp.db');
+      final backupFolderUrl = Uri.parse('$_baseUrl/vaults/$userHash/backups/');
+      await _client.send(
+          http.Request('MKCOL', backupFolderUrl)..headers.addAll(headers)
+      ).timeout(const Duration(seconds: 10));
 
-    final copyHeaders = Map<String, String>.from(headers)
-      ..['Destination'] = backupUrl.toString()
-      ..['Overwrite'] = 'F';
+      final sourceUrl = Uri.parse('$_baseUrl/vaults/$userHash/vault.db');
+      final timestamp = DateTime.now().toUtc().toIso8601String().replaceAll(':', '-');
+      final backupUrl = Uri.parse('$_baseUrl/vaults/$userHash/backups/vault_$timestamp.db');
 
-    final copyResponse = await _client.send(
-        http.Request('COPY', sourceUrl)..headers.addAll(copyHeaders)
-    );
+      final copyHeaders = Map<String, String>.from(headers)
+        ..['Destination'] = backupUrl.toString()
+        ..['Overwrite'] = 'F';
 
-    if (copyResponse.statusCode >= 400 && copyResponse.statusCode != 404) {
-      throw Exception('Échec de la création de la sauvegarde rotative.');
-    }
+      final copyResponse = await _client.send(
+          http.Request('COPY', sourceUrl)..headers.addAll(copyHeaders)
+      ).timeout(const Duration(seconds: 15));
+
+      if (copyResponse.statusCode >= 400 && copyResponse.statusCode != 404) {
+        throw Exception('Échec de la création de la sauvegarde rotative.');
+      }
+    });
   }
 }
